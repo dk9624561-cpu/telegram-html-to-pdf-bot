@@ -14,6 +14,11 @@ if sys.platform == "win32":
     except Exception:
         pass
 
+# Configure long timeouts to handle large PDF uploads smoothly
+telebot.apihelper.READ_TIMEOUT = 900       # 15 minutes
+telebot.apihelper.CONNECT_TIMEOUT = 90     # 90 seconds
+telebot.apihelper.RETRY_ON_ERROR = True
+
 from converter import convert_html_to_pdf
 
 logging.basicConfig(
@@ -67,7 +72,7 @@ def send_welcome(message):
     welcome_text = (
         "👋 *Namaste!*\n\n"
         "Main aapka *All-in-One Lecture HTML & PDF Bot* hoon.\n\n"
-        "✨ *Kya-kya kar sakta hoon:*\n\n"
+        "✨ *Features:*\n\n"
         "1️⃣ *HTML to 1-2 Page PDF:*\n"
         "• Koi bhi Lecture Summary `.html` file bhejiye.\n"
         "• Main turant usko clean 2-column compact 1-2 page PDF me convert kar dunga.\n\n"
@@ -75,7 +80,7 @@ def send_welcome(message):
         "• Command bhejiye: **/merge**\n"
         "• Fir apni saari PDF files ek-ek karke send kijiye.\n"
         "• Sabhi bhej lene ke baad command bhejiye: **/done**\n"
-        "• Main sabhi PDFs ko jodkar ek single PDF bana dunga!\n\n"
+        "• Main sabhi PDFs ko jodkar ek compressed, clean PDF bana dunga!\n\n"
         "🚀 *Commands:*\n"
         "• `/merge` - PDF merge mode shuru karein\n"
         "• `/done` - Sabhi bheji gayi PDFs ko merge karein\n"
@@ -87,7 +92,6 @@ def send_welcome(message):
 @bot.message_handler(commands=['merge', 'startmerge'])
 def start_merge_mode(message):
     chat_id = message.chat.id
-    # Clean up previous session if any
     if chat_id in USER_MERGE_SESSIONS:
         cleanup_session(chat_id)
 
@@ -141,7 +145,7 @@ def perform_merge(message):
 
     status_msg = bot.reply_to(
         message,
-        f"⏳ *Merging {len(files)} PDF files...* Kripya intazar karein.",
+        f"⏳ *Merging {len(files)} PDF files...* Files ko combine aur compress kiya ja raha hai...",
         parse_mode="Markdown"
     )
 
@@ -154,9 +158,28 @@ def perform_merge(message):
             merged_doc.insert_pdf(sub_doc)
             sub_doc.close()
 
-        merged_doc.save(merged_output_path)
+        # Save with compression & garbage collection to make file size smaller and upload faster
+        merged_doc.save(merged_output_path, garbage=4, deflate=True)
         total_pages = len(merged_doc)
         merged_doc.close()
+
+        file_size_mb = os.path.getsize(merged_output_path) / (1024 * 1024)
+
+        try:
+            bot.edit_message_text(
+                f"📤 *PDF ban gayi ({file_size_mb:.2f} MB, {total_pages} Pages)!* Telegram par upload ho rahi hai... ⏳",
+                chat_id=chat_id,
+                message_id=status_msg.message_id,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            pass
+
+        # Inform telegram user of upload status
+        try:
+            bot.send_chat_action(chat_id, 'upload_document')
+        except Exception:
+            pass
 
         file_list_str = "\n".join([f"• `{name}`" for name in names[:10]])
         if len(names) > 10:
@@ -165,8 +188,9 @@ def perform_merge(message):
         caption = (
             f"✅ *All PDFs Merged Successfully!*\n\n"
             f"📁 *Combined Files:* {len(files)}\n"
-            f"📄 *Total Pages:* {total_pages}\n\n"
-            f"📋 *Files list:*\n{file_list_str}"
+            f"📄 *Total Pages:* {total_pages}\n"
+            f"💾 *Size:* {file_size_mb:.2f} MB\n\n"
+            f"📋 *Files:*\n{file_list_str}"
         )
 
         with open(merged_output_path, "rb") as out_f:
@@ -176,7 +200,8 @@ def perform_merge(message):
                 visible_file_name=f"Merged_{len(files)}_Documents.pdf",
                 caption=caption,
                 parse_mode="Markdown",
-                reply_to_message_id=message.message_id
+                reply_to_message_id=message.message_id,
+                timeout=900
             )
 
         try:
@@ -186,11 +211,14 @@ def perform_merge(message):
 
     except Exception as e:
         logger.error(f"Error merging PDFs: {e}", exc_info=True)
-        bot.edit_message_text(
-            f"❌ PDF merge karne me error aayi: {str(e)[:200]}",
-            chat_id=chat_id,
-            message_id=status_msg.message_id
-        )
+        try:
+            bot.edit_message_text(
+                f"❌ PDF merge karne me error aayi: {str(e)[:200]}",
+                chat_id=chat_id,
+                message_id=status_msg.message_id
+            )
+        except Exception:
+            bot.reply_to(message, f"❌ PDF merge karne me error aayi: {str(e)[:200]}")
     finally:
         cleanup_session(chat_id)
         if os.path.exists(merged_output_path):
@@ -202,7 +230,11 @@ def perform_merge(message):
 @bot.callback_query_handler(func=lambda call: call.data in ["action_done", "action_cancel"])
 def handle_callback(call):
     chat_id = call.message.chat.id
-    bot.answer_callback_query(call.id)
+    try:
+        bot.answer_callback_query(call.id)
+    except Exception:
+        pass
+        
     if call.data == "action_done":
         perform_merge(call.message)
     elif call.data == "action_cancel":
@@ -238,7 +270,6 @@ def handle_document(message):
                 with open(pdf_path, "wb") as f:
                     f.write(downloaded_bytes)
 
-                # Check validity with fitz
                 doc = fitz.open(pdf_path)
                 p_count = len(doc)
                 doc.close()
@@ -261,7 +292,6 @@ def handle_document(message):
                 logger.error(f"Error processing PDF in merge mode: {e}")
                 bot.reply_to(message, f"❌ Is PDF ko add karne me samasya aayi: {e}")
         else:
-            # Inform user how to merge
             bot.reply_to(
                 message,
                 "📄 *Aapne PDF file bheji hai.*\n\n"
@@ -323,7 +353,8 @@ def handle_document(message):
                 visible_file_name=f"{base_clean_name}_Summary.pdf",
                 caption=caption,
                 parse_mode="Markdown",
-                reply_to_message_id=message.message_id
+                reply_to_message_id=message.message_id,
+                timeout=900
             )
 
         try:
@@ -356,7 +387,7 @@ if __name__ == "__main__":
         bot_info = bot.get_me()
         print(f"✅ Bot Online: @{bot_info.username} ({bot_info.first_name})")
         print("Ready for HTML-to-PDF and PDF-Merge tasks...")
-        bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        bot.infinity_polling(timeout=20, long_polling_timeout=10)
     except Exception as e:
         print(f"❌ Could not connect bot: {e}")
         print("Please verify your bot token in config.json")
