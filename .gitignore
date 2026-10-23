@@ -1,0 +1,17 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary and output files
+temp/
+*.pdf
+*.png
+*.log
+
+# Sensitive environment files
+.env
+
+# OS files
+Thumbs.db
+.DS_Store
